@@ -1,354 +1,222 @@
-import { randomUUID } from 'crypto';
-import OpenAI from 'openai';
+import 'dotenv/config';
+import cors from 'cors';
+import express, { Request, Response, NextFunction } from 'express';
+import { z } from 'zod';
+import {
+  createSession,
+  getQuestionsForRole,
+  getSession,
+  getSessionSummary,
+  listSessions,
+  submitTurn,
+} from './lib/interview';
+import {
+  generateApiKey,
+  validateApiKey,
+  listApiKeys,
+  getApiKey,
+  revokeApiKey,
+  deleteApiKey,
+} from './lib/apikeys';
 
-export type Question = {
-  id: string;
-  text: string;
-  category: string;
-};
+const app = express();
+const port = Number(process.env.PORT ?? 4000);
+const adminKey = process.env.ADMIN_KEY || 'dev-admin-key';
 
-export type InterviewTurn = {
-  id: string;
-  questionId: string;
-  question: string;
-  answer: string;
-  feedback: string;
-  score: number;
-  createdAt: string;
-};
+app.use(cors());
+app.use(express.json({ limit: '1mb' }));
 
-export type InterviewSession = {
-  id: string;
-  role: string;
-  jobTitle: string;
-  createdAt: string;
-  questions: Question[];
-  turns: InterviewTurn[];
-  summary: string;
-};
-
-export type InterviewSummary = {
-  sessionId: string;
-  role: string;
-  summary: string;
-  averageScore: number;
-  totalTurns: number;
-};
-
-const sessions = new Map<string, InterviewSession>();
-
-const questionBank: Record<string, Question[]> = {
-  default: [
-    {
-      id: 'q-default-1',
-      text: 'Tell me about a time you solved a problem that required initiative.',
-      category: 'Behavioral',
-    },
-    {
-      id: 'q-default-2',
-      text: 'How do you work with people whose priorities differ from your own?',
-      category: 'Collaboration',
-    },
-    {
-      id: 'q-default-3',
-      text: 'What does success look like to you in this role?',
-      category: 'Motivation',
-    },
-  ],
-  engineer: [
-    {
-      id: 'q-engineer-1',
-      text: 'Tell me about a technical challenge you solved and how you made the decision.',
-      category: 'Technical',
-    },
-    {
-      id: 'q-engineer-2',
-      text: 'How do you balance speed, quality, and maintainability in product work?',
-      category: 'Engineering Judgment',
-    },
-    {
-      id: 'q-engineer-3',
-      text: 'Describe a time you improved a system or workflow for your team.',
-      category: 'Impact',
-    },
-    {
-      id: 'q-engineer-4',
-      text: 'How do you handle ambiguity when requirements are still changing?',
-      category: 'Problem Solving',
-    },
-  ],
-  product: [
-    {
-      id: 'q-product-1',
-      text: 'Describe a product decision you made that was not obvious at the start but improved outcomes.',
-      category: 'Product Thinking',
-    },
-    {
-      id: 'q-product-2',
-      text: 'How do you prioritize between user needs, business goals, and technical constraints?',
-      category: 'Prioritization',
-    },
-    {
-      id: 'q-product-3',
-      text: 'Tell me about a time you aligned stakeholders with competing opinions.',
-      category: 'Stakeholder Management',
-    },
-  ],
-  data: [
-    {
-      id: 'q-data-1',
-      text: 'Walk me through a data analysis project where your findings changed a decision.',
-      category: 'Analytics',
-    },
-    {
-      id: 'q-data-2',
-      text: 'How do you validate that a model or metric is actually trustworthy?',
-      category: 'Methodology',
-    },
-    {
-      id: 'q-data-3',
-      text: 'How do you communicate complex insights to non-technical stakeholders?',
-      category: 'Communication',
-    },
-  ],
-  design: [
-    {
-      id: 'q-design-1',
-      text: 'Describe a design decision that improved usability significantly.',
-      category: 'Design',
-    },
-    {
-      id: 'q-design-2',
-      text: 'How do you incorporate user research into your design process?',
-      category: 'Research',
-    },
-    {
-      id: 'q-design-3',
-      text: 'How do you decide when to iterate versus when to push for a bigger redesign?',
-      category: 'Judgment',
-    },
-  ],
-  sales: [
-    {
-      id: 'q-sales-1',
-      text: 'Describe a time you won a deal by understanding the customer’s constraints better than the competition.',
-      category: 'Sales',
-    },
-    {
-      id: 'q-sales-2',
-      text: 'How do you build trust quickly with a skeptical buyer?',
-      category: 'Relationship Building',
-    },
-    {
-      id: 'q-sales-3',
-      text: 'Tell me about a time you turned a lost opportunity into a learning moment.',
-      category: 'Resilience',
-    },
-  ],
-  customer_support: [
-    {
-      id: 'q-support-1',
-      text: 'Tell me about a time you de-escalated a difficult customer interaction.',
-      category: 'Customer Experience',
-    },
-    {
-      id: 'q-support-2',
-      text: 'How do you balance empathy with operational efficiency?',
-      category: 'Operations',
-    },
-    {
-      id: 'q-support-3',
-      text: 'What systems or habits help you keep service quality consistent at scale?',
-      category: 'Scalability',
-    },
-  ],
-};
-
-function determineRoleQuestions(role: string): Question[] {
-  const normalized = role.toLowerCase();
-
-  if (normalized.includes('engineer') || normalized.includes('developer') || normalized.includes('software')) {
-    return questionBank.engineer;
+declare global {
+  namespace Express {
+    interface Request {
+      apiKeyId?: string;
+    }
   }
-
-  if (normalized.includes('product')) {
-    return questionBank.product;
-  }
-
-  if (normalized.includes('data') || normalized.includes('analyst')) {
-    return questionBank.data;
-  }
-
-  if (normalized.includes('design') || normalized.includes('ux')) {
-    return questionBank.design;
-  }
-
-  if (normalized.includes('sales')) {
-    return questionBank.sales;
-  }
-
-  if (normalized.includes('support') || normalized.includes('customer')) {
-    return questionBank.customer_support;
-  }
-
-  return questionBank.default;
 }
 
-function buildSummary(turns: InterviewTurn[]): string {
-  if (turns.length === 0) {
-    return 'No responses yet. The interview has started.';
+const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid authorization header' });
   }
 
-  const averageScore = Math.round(
-    turns.reduce((total, turn) => total + turn.score, 0) / turns.length,
-  );
+  const token = authHeader.slice(7);
+  const validation = validateApiKey(token);
 
-  const latest = turns[turns.length - 1];
-
-  return `Average score: ${averageScore}/100. Latest answer: ${latest.feedback}`;
-}
-
-function computeAnswerScore(answer: string): number {
-  const words = answer.trim().split(/\s+/).filter(Boolean).length;
-
-  if (words < 20) return 58;
-  if (words < 45) return 72;
-  if (words < 80) return 84;
-  return 92;
-}
-
-async function generateOpenAIFeedback(question: string, answer: string): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY;
-
-  if (!apiKey) {
-    return 'No OpenAI key configured. Using the built-in evaluation model for now.';
+  if (!validation.valid) {
+    return res.status(401).json({ error: 'Invalid API key' });
   }
 
-  const client = new OpenAI({ apiKey });
+  req.apiKeyId = validation.id;
+  next();
+};
+
+const adminAuthMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid authorization header' });
+  }
+
+  const token = authHeader.slice(7);
+
+  if (token === adminKey) {
+    next();
+    return;
+  }
+
+  const validation = validateApiKey(token);
+  if (!validation.valid) {
+    return res.status(401).json({ error: 'Invalid API key' });
+  }
+
+  req.apiKeyId = validation.id;
+  next();
+};
+
+const createSessionSchema = z.object({
+  role: z.string().min(2),
+  jobTitle: z.string().min(2),
+});
+
+const submitTurnSchema = z.object({
+  questionId: z.string().min(1),
+  answer: z.string().min(10),
+});
+
+const createApiKeySchema = z.object({
+  name: z.string().min(2),
+});
+
+app.get('/health', (_req: Request, res: Response) => {
+  res.json({
+    ok: true,
+    service: 'ghostly-ai-api',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.post('/api/keys', adminAuthMiddleware, (req: Request, res: Response) => {
+  const parsed = createApiKeySchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: 'Invalid payload',
+      details: parsed.error.flatten(),
+    });
+  }
+
+  const apiKey = generateApiKey(parsed.data.name);
+  return res.status(201).json(apiKey);
+});
+
+app.get('/api/keys', adminAuthMiddleware, (_req: Request, res: Response) => {
+  res.json(listApiKeys());
+});
+
+app.get('/api/keys/:id', adminAuthMiddleware, (req: Request, res: Response) => {
+  const key = getApiKey(req.params.id);
+
+  if (!key) {
+    return res.status(404).json({ error: 'API key not found' });
+  }
+
+  res.json(key);
+});
+
+app.post('/api/keys/:id/revoke', adminAuthMiddleware, (req: Request, res: Response) => {
+  const success = revokeApiKey(req.params.id);
+
+  if (!success) {
+    return res.status(404).json({ error: 'API key not found' });
+  }
+
+  res.json({ message: 'API key revoked' });
+});
+
+app.delete('/api/keys/:id', adminAuthMiddleware, (req: Request, res: Response) => {
+  const success = deleteApiKey(req.params.id);
+
+  if (!success) {
+    return res.status(404).json({ error: 'API key not found' });
+  }
+
+  res.json({ message: 'API key deleted' });
+});
+
+app.get('/api/interviews/sessions', authMiddleware, (_req: Request, res: Response) => {
+  res.json(listSessions());
+});
+
+app.post('/api/interviews/sessions', authMiddleware, (req: Request, res: Response) => {
+  const parsed = createSessionSchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: 'Invalid session payload',
+      details: parsed.error.flatten(),
+    });
+  }
+
+  const session = createSession(parsed.data.role, parsed.data.jobTitle);
+  return res.status(201).json(session);
+});
+
+app.get('/api/interviews/roles/:role/questions', authMiddleware, (req: Request, res: Response) => {
+  const { role } = req.params;
+  res.json(getQuestionsForRole(role));
+});
+
+app.get('/api/interviews/sessions/:sessionId', authMiddleware, (req: Request, res: Response) => {
+  const { sessionId } = req.params;
 
   try {
-    const completion = await client.chat.completions.create({
-      model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
-      temperature: 0.35,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a professional interview coach. Give concise but useful feedback with strengths, gaps, and one next step the candidate can improve immediately.',
-        },
-        {
-          role: 'user',
-          content: `Question: ${question}\n\nCandidate answer: ${answer}`,
-        },
-      ],
+    const session = getSession(sessionId);
+    return res.json(session);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return res.status(404).json({ error: message });
+  }
+});
+
+app.post('/api/interviews/sessions/:sessionId/turn', authMiddleware, async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const parsed = submitTurnSchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: 'Invalid answer payload',
+      details: parsed.error.flatten(),
     });
-
-    const content = completion.choices[0]?.message?.content;
-    return content?.trim() || 'Feedback generated successfully.';
-  } catch {
-    return 'AI feedback could not be generated, so the fallback evaluation was used instead.';
-  }
-}
-
-export function createSession(role: string, jobTitle: string): InterviewSession {
-  const session: InterviewSession = {
-    id: randomUUID(),
-    role,
-    jobTitle,
-    createdAt: new Date().toISOString(),
-    questions: determineRoleQuestions(role),
-    turns: [],
-    summary: 'No responses yet. The interview has started.',
-  };
-
-  sessions.set(session.id, session);
-  return session;
-}
-
-export function getSession(sessionId: string): InterviewSession {
-  const session = sessions.get(sessionId);
-
-  if (!session) {
-    throw new Error(`Interview session ${sessionId} not found`);
   }
 
-  return session;
-}
-
-export function getQuestionsForRole(role: string): Question[] {
-  return determineRoleQuestions(role);
-}
-
-export function getSessionSummary(sessionId: string): InterviewSummary {
-  const session = getSession(sessionId);
-
-  return {
-    sessionId: session.id,
-    role: session.role,
-    summary: session.summary,
-    averageScore: session.turns.length
-      ? Math.round(
-          session.turns.reduce((total, turn) => total + turn.score, 0) / session.turns.length,
-        )
-      : 0,
-    totalTurns: session.turns.length,
-  };
-}
-
-export async function submitTurn(
-  sessionId: string,
-  questionId: string,
-  answer: string,
-): Promise<InterviewSession> {
-  const session = sessions.get(sessionId);
-
-  if (!session) {
-    throw new Error(`Interview session ${sessionId} not found`);
+  try {
+    const updatedSession = await submitTurn(sessionId, parsed.data.questionId, parsed.data.answer);
+    return res.json(updatedSession);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return res.status(404).json({ error: message });
   }
+});
 
-  const question = session.questions.find((item) => item.id === questionId);
+app.get('/api/interviews/sessions/:sessionId/summary', authMiddleware, (req: Request, res: Response) => {
+  const { sessionId } = req.params;
 
-  if (!question) {
-    throw new Error(`Question ${questionId} not found in session ${sessionId}`);
+  try {
+    const summary = getSessionSummary(sessionId);
+    return res.json(summary);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return res.status(404).json({ error: message });
   }
+});
 
-  const score = computeAnswerScore(answer);
-  const feedback = await generateOpenAIFeedback(question.text, answer).catch(
-    () => 'The answer was recorded. Use the score as a signal and improve with more concrete examples and outcomes.',
-  );
+app.use((_req: Request, res: Response) => {
+  res.status(404).json({ error: 'Route not found' });
+});
 
-  const turn: InterviewTurn = {
-    id: randomUUID(),
-    questionId: question.id,
-    question: question.text,
-    answer,
-    feedback: feedback.length > 260 ? `${feedback.slice(0, 257)}...` : feedback,
-    score,
-    createdAt: new Date().toISOString(),
-  };
-
-  session.turns.push(turn);
-  session.summary = buildSummary(session.turns);
-  sessions.set(sessionId, session);
-
-  return session;
-}
-
-export function listSessions(): InterviewSession[] {
-  return Array.from(sessions.values());
-}
-
-export function resetSessionsForDemo(): void {
-  sessions.clear();
-}
-
-export function countSessions(): number {
-  return sessions.size;
-}
-
-export function seedDemoSession(): InterviewSession {
-  const created = createSession('Senior Product Engineer', 'senior-product-engineer');
-  sessions.set(created.id, created);
-  return created;
-}
-
+app.listen(port, () => {
+  console.log(`Ghostly AI API listening on http://localhost:${port}`);
+  console.log(`Admin key (dev): ${adminKey}`);
+});

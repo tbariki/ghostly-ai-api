@@ -1,95 +1,111 @@
-# Ghostly AI API
+import 'dotenv/config';
+import cors from 'cors';
+import express, { Request, Response } from 'express';
+import { z } from 'zod';
+import {
+  createSession,
+  getQuestionsForRole,
+  getSession,
+  getSessionSummary,
+  listSessions,
+  submitTurn,
+} from './lib/interview';
 
-A lightweight backend for an interview AI assistant. This project provides the API foundation for creating interview sessions, collecting candidate answers, evaluating responses, and returning coaching feedback.
+const app = express();
+const port = Number(process.env.PORT ?? 4000);
 
-## Features
+app.use(cors());
+app.use(express.json({ limit: '1mb' }));
 
-- Create interview sessions for a role or job title
-- Serve a curated set of interview questions
-- Accept candidate answers
-- Evaluate each answer with a score and feedback
-- Return session summaries for dashboards or frontend clients
-- Optional OpenAI-powered feedback when `OPENAI_API_KEY` is present
-- Graceful fallback when no AI key is configured
+const createSessionSchema = z.object({
+  role: z.string().min(2),
+  jobTitle: z.string().min(2),
+});
 
-## Tech Stack
+const submitTurnSchema = z.object({
+  questionId: z.string().min(1),
+  answer: z.string().min(10),
+});
 
-- Node.js
-- TypeScript
-- Express
-- OpenAI API integration
-- Zod validation
+app.get('/health', (_req: Request, res: Response) => {
+  res.json({
+    ok: true,
+    service: 'ghostly-ai-api',
+    timestamp: new Date().toISOString(),
+  });
+});
 
-## Getting Started
+app.get('/api/interviews/sessions', (_req: Request, res: Response) => {
+  res.json(listSessions());
+});
 
-1. Install dependencies:
+app.post('/api/interviews/sessions', (req: Request, res: Response) => {
+  const parsed = createSessionSchema.safeParse(req.body);
 
-   ```bash
-   npm install
-   ```
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: 'Invalid session payload',
+      details: parsed.error.flatten(),
+    });
+  }
 
-2. Copy the environment file:
+  const session = createSession(parsed.data.role, parsed.data.jobTitle);
+  return res.status(201).json(session);
+});
 
-   ```bash
-   cp .env.example .env
-   ```
+app.get('/api/interviews/roles/:role/questions', (req: Request, res: Response) => {
+  const { role } = req.params;
+  res.json(getQuestionsForRole(role));
+});
 
-3. Optionally add your OpenAI key:
+app.get('/api/interviews/sessions/:sessionId', (req: Request, res: Response) => {
+  const { sessionId } = req.params;
 
-   ```bash
-   OPENAI_API_KEY=your_key_here
-   ```
+  try {
+    const session = getSession(sessionId);
+    return res.json(session);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return res.status(404).json({ error: message });
+  }
+});
 
-4. Run the dev server:
+app.post('/api/interviews/sessions/:sessionId/turn', async (req: Request, res: Response) => {
+  const { sessionId } = req.params;
+  const parsed = submitTurnSchema.safeParse(req.body);
 
-   ```bash
-   npm run dev
-   ```
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: 'Invalid answer payload',
+      details: parsed.error.flatten(),
+    });
+  }
 
-5. Health check:
+  try {
+    const updatedSession = await submitTurn(sessionId, parsed.data.questionId, parsed.data.answer);
+    return res.json(updatedSession);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return res.status(404).json({ error: message });
+  }
+});
 
-   ```bash
-   curl http://localhost:4000/health
-   ```
+app.get('/api/interviews/sessions/:sessionId/summary', (req: Request, res: Response) => {
+  const { sessionId } = req.params;
 
-## API Overview
+  try {
+    const summary = getSessionSummary(sessionId);
+    return res.json(summary);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return res.status(404).json({ error: message });
+  }
+});
 
-### Create interview session
+app.use((_req: Request, res: Response) => {
+  res.status(404).json({ error: 'Route not found' });
+});
 
-```http
-POST /api/interviews/sessions
-Content-Type: application/json
-
-{
-  "role": "Senior Frontend Engineer",
-  "jobTitle": "senior-frontend-engineer"
-}
-```
-
-### Submit an answer
-
-```http
-POST /api/interviews/sessions/:sessionId/turn
-Content-Type: application/json
-
-{
-  "questionId": "q-1",
-  "answer": "I focus on the user problem first..."
-}
-```
-
-### Get session details
-
-```http
-GET /api/interviews/sessions/:sessionId
-```
-
-### Get summary
-
-```http
-GET /api/interviews/sessions/:sessionId/summary
-```
-
-## Notes
-
-This is a working starter API intended to be expanded with authentication, persistence, real database storage, and more advanced evaluation logic.
+app.listen(port, () => {
+  console.log(`Ghostly AI API listening on http://localhost:${port}`);
+});
